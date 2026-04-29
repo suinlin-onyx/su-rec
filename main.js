@@ -131,13 +131,13 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
     handleServerData(text) {
         if (!this.isRecording) return;
 
-        // 过滤掉命令响应（如 OK: started, OK: stopped 等）
-        if (/^OK:/.test(text.trim())) {
+        // 过滤命令响应
+        if (/^OK/.test(text.trim())) {
             return;
         }
 
-        // 过滤掉系统消息
-        if (/^(Recording|Transcription|Model|Server)/.test(text.trim())) {
+        // 过滤系统消息
+        if (/^(Recording|Transcription|Model|Server|Loading)/.test(text.trim())) {
             return;
         }
 
@@ -147,21 +147,34 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
         text = text.replace(/^.*\|.*$/gm, "");
         text = text.replace(/^.*Listening.*$/gm, "");
 
-        var matches = text.match(/[一-龥a-zA-Z0-9.,!?;:，。！？；：""''（）【】《》\s]+/g);
+        var matches = text.match(/[一-龥a-zA-Z0-9.,!?;:，。！？；：""''（）【】《》\s\n]+/g);
         if (matches) {
             var extracted = matches.join("").trim();
             if (extracted && extracted.length > 0) {
-                if (extracted !== this.lastText) {
+                // 如果有换行符，处理多行
+                if (extracted.indexOf('\n') >= 0) {
+                    // 多行文本，替换当前内容
+                    var lines = extracted.split('\n');
+                    for (var i = 0; i < lines.length; i++) {
+                        if (lines[i].trim()) {
+                            this.currentText += lines[i].trim() + "\n";
+                        }
+                    }
+                } else if (extracted !== this.lastText) {
                     this.currentText += extracted + " ";
                     this.lastText = extracted;
-
-                    var preview = extracted.substring(0, 30);
-                    if (extracted.length > 30) preview += "...";
-                    this.statusBarItem.setText(preview);
-                    this.ribbonIcon.style.backgroundColor = "#90EE90";
-
-                    this.updateNote();
                 }
+
+                // 提取预览（取最后一行或最后一段）
+                var previewLines = extracted.split('\n');
+                var lastLine = previewLines[previewLines.length - 1].trim();
+                var preview = lastLine.substring(0, 30);
+                if (lastLine.length > 30) preview += "...";
+
+                this.statusBarItem.setText(preview);
+                this.ribbonIcon.style.backgroundColor = "#90EE90";
+
+                this.updateNote();
             }
         }
     }
