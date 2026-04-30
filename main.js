@@ -1,6 +1,5 @@
 /*
-FunASR Transcription Plugin - Client Mode
-连接后台服务进行转写
+FunASR Transcription Plugin - State Machine v3
 */
 
 var import_obsidian = require("obsidian");
@@ -9,50 +8,119 @@ var import_net = require("net");
 var FunASRTranscribe = class extends import_obsidian.Plugin {
     constructor() {
         super(...arguments);
+
+        // state: offline | connecting | recording | stopped
+        this.state = "offline";
         this.isRecording = false;
+
         this.client = null;
-        this.currentText = "";
-        this.lastText = "";
         this.ribbonIcon = null;
-        this.currentFile = "";
+        this.statusBarItem = null;
         this.serverProcess = null;
+        this.currentFile = "";
+        this.currentText = "";
+
+        this._colors = {
+            offline: "#ff4444",      // red
+            connecting: "#4488ff",    // blue
+            recording: "#44ff44",     // green
+            stopped: "#ff8800"        // orange
+        };
+
+        this._labels = {
+            offline: "Click to connect",
+            connecting: "Connecting...",
+            recording: "Click to stop",
+            stopped: "Click to resume"
+        };
+
+        this._transitions = {
+            offline: ["connecting"],
+            connecting: ["recording", "stopped"],
+            recording: ["stopped"],
+            stopped: ["recording"]
+        };
+
+        this._isIntentionalClose = false;
+        this._isStartingServer = false;
+        this._retryTimer = null;
+    }
+
+    setState(newState) {
+        var from = this.state;
+
+        // allow self-transition
+        if (from === newState) {
+            return true;
+        }
+
+        var allowed = this._transitions[from];
+
+        if (!allowed || !allowed.includes(newState)) {
+            console.log("[State] " + from + " -> " + newState + " (invalid)");
+            return false;
+        }
+
+        this.state = newState;
+        this.ribbonIcon.style.backgroundColor = this._colors[newState];
+        this.ribbonIcon.setAttribute("aria-label", this._labels[newState]);
+
+        console.log("[State] " + from + " -> " + newState);
+        return true;
     }
 
     async onload() {
         var self = this;
 
         this.ribbonIcon = this.addRibbonIcon("mic", "Transcription", () => {
-            self.toggleRecording();
+            self.onClick();
         });
-        this.ribbonIcon.style.backgroundColor = "#ffd966";
         this.ribbonIcon.style.borderRadius = "50%";
         this.ribbonIcon.style.padding = "6px";
 
         this.statusBarItem = this.addStatusBarItem();
-        this.statusBarItem.setText("Ready");
-
-        // 连接服务器
-        this.tryConnect();
+        this.setState("offline");
 
         console.log("Plugin loaded");
     }
 
     onunload() {
-        // 保存当前内容
         if (this.currentText) {
-            this.updateNoteSync();
+            this._saveSync();
         }
-        this.disconnect();
-        console.log("Plugin unloaded");
+        this._cleanup();
     }
 
-    // 尝试连接服务器
-    tryConnect() {
+    onClick() {
+        switch (this.state) {
+            case "offline":
+                this._tryConnect();
+                break;
+
+            case "connecting":
+                // do nothing, wait
+                break;
+
+            case "recording":
+                this._stopRecording();
+                break;
+
+            case "stopped":
+                this._resumeRecording();
+                break;
+        }
+    }
+
+    _tryConnect() {
         var self = this;
 
+        if (this.state !== "offline") {
+            return;
+        }
+
+        this.setState("connecting");
         this.statusBarItem.setText("Connecting...");
 
-        // 关闭旧连接
         if (this.client) {
             try { this.client.destroy(); } catch(e) {}
             this.client = null;
@@ -60,272 +128,165 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
 
         this.client = new import_net.Socket();
 
-        this.client.on("error", function(err) {
-            console.log("Connection error:", err.message);
-            self.statusBarItem.setText("Starting server...");
-            self.ribbonIcon.style.backgroundColor = "#ffb3ba";
-            self.startServer();
+        this.client.on("error", (err) => {
+            console.log("[TCP] Error:", err.message);
+            self.statusBarItem.setText("Connection failed, starting server...");
+
+            // go back to offline so user can click again
+            self._forceOffline();
+            self._scheduleRetry();
         });
 
-        this.client.on("close", function() {
-            console.log("Connection closed");
-            self.isRecording = false;
-            self.statusBarItem.setText("Disconnected");
-            self.ribbonIcon.style.backgroundColor = "#ff6666";
+        this.client.on("close", () => {
+            console.log("[TCP] Closed");
+
+            // connection lost: force offline (bypass state machine)
+            if (!self._isIntentionalClose && self.state !== "offline") {
+                self._forceOffline();
+            }
+            self._isIntentionalClose = false;
         });
 
-        this.client.on("data", function(data) {
-            var text = data.toString("utf-8");
-            self.handleServerData(text);
+        this.client.on("data", (data) => {
+            self._handleData(data.toString("utf-8"));
         });
 
-        this.client.connect(9876, "127.0.0.1", function() {
-            console.log("Connected to server");
-            self.statusBarItem.setText("Ready");
-            self.ribbonIcon.style.backgroundColor = "#ffd966";
-            new import_obsidian.Notice("Server connected");
+        this.client.connect(9876, "127.0.0.1", () => {
+            console.log("[TCP] Connected");
+            new import_obsidian.Notice("Connected to server");
+            self._isStartingServer = false;  // reset flag
+
+            // connected -> start recording
+            self.setState("recording");
+            self._startRecording();
         });
     }
 
-    // 启动服务器
-    startServer() {
+    _startServer() {
         var self = this;
-        console.log("Starting server...");
+
+        // prevent multiple server starts
+        if (this._isStartingServer) {
+            console.log("[Server] Already starting...");
+            return;
+        }
+        this._isStartingServer = true;
+
+        console.log("[Server] Starting...");
+
+        this.statusBarItem.setText("Starting server...");
 
         var spawn = require("child_process");
-        var serverPath = "D:\\arvin\\obsidian_workpace\\voice-transcribe\\transcribe_server.py";
+        var serverPath = "D:\\arvin\\obsidian_workpace\\voice-transcribe\\transcribe_server_v3.py";
 
-        // 先杀掉旧进程
         if (this.serverProcess) {
             try { this.serverProcess.kill(); } catch(e) {}
         }
 
-        // 启动新进程
-        this.serverProcess = spawn.spawn("py", ["-3.11", serverPath], {
+        this.serverProcess = spawn.spawn("cmd", ["/c", "start", "/B", "py", "-3.11", serverPath], {
             cwd: "D:\\arvin\\obsidian_workpace\\voice-transcribe",
-            shell: true,
-            detached: false,
-            stdio: ["ignore", "pipe", "pipe"]
+            shell: false,
+            detached: false
         });
 
-        this.serverProcess.stdout.on("data", function(data) {
-            console.log("Server:", data.toString().trim());
-        });
-
-        this.serverProcess.stderr.on("data", function(data) {
-            console.log("Server err:", data.toString().trim());
-        });
-
-        this.serverProcess.on("close", function(code) {
-            console.log("Server closed:", code);
+        this.serverProcess.on("close", (code) => {
+            console.log("[Server] Closed:", code);
             self.serverProcess = null;
         });
-
-        // 等待服务器启动后连接
-        setTimeout(function() {
-            self.tryConnect();
-        }, 5000);
     }
 
-    // 处理服务器数据
-    handleServerData(text) {
-        if (!this.isRecording) return;
-
-        // 过滤命令响应
-        if (/^OK/.test(text.trim())) {
-            return;
-        }
-
-        // 过滤系统消息
-        if (/^(Recording|Transcription|Model|Server|Loading)/.test(text.trim())) {
-            return;
-        }
-
-        text = text.replace(/\x1b\[[0-9;]*m/g, "");
-        text = text.replace(/<\|[^|]*\|>/g, "");
-        text = text.replace(/^.*100%.*$/gm, "");
-        text = text.replace(/^.*\|.*$/gm, "");
-        text = text.replace(/^.*Listening.*$/gm, "");
-
-        var matches = text.match(/[一-龥a-zA-Z0-9.,!?;:，。！？；：""''（）【】《》\s\n]+/g);
-        if (matches) {
-            var extracted = matches.join("").trim();
-            if (extracted && extracted.length > 0) {
-                // 如果有换行符，处理多行
-                if (extracted.indexOf('\n') >= 0) {
-                    // 多行文本，替换当前内容
-                    var lines = extracted.split('\n');
-                    for (var i = 0; i < lines.length; i++) {
-                        if (lines[i].trim()) {
-                            this.currentText += lines[i].trim() + "\n";
-                        }
-                    }
-                } else if (extracted !== this.lastText) {
-                    this.currentText += extracted + " ";
-                    this.lastText = extracted;
-                }
-
-                // 提取预览（取最后一行或最后一段）
-                var previewLines = extracted.split('\n');
-                var lastLine = previewLines[previewLines.length - 1].trim();
-                var preview = lastLine.substring(0, 30);
-                if (lastLine.length > 30) preview += "...";
-
-                this.statusBarItem.setText(preview);
-                this.ribbonIcon.style.backgroundColor = "#90EE90";
-
-                this.updateNote();
-            }
-        }
-    }
-
-    toggleRecording() {
-        if (this.isRecording) {
-            this.stopRecording();
-        } else {
-            this.startRecording();
-        }
-    }
-
-    async startRecording() {
+    _scheduleRetry() {
         var self = this;
 
-        if (!this.client || this.client.destroyed) {
-            new import_obsidian.Notice("Not connected, trying...");
-            this.tryConnect();
+        // if server not running, start it first
+        if (!this.serverProcess && !this._isStartingServer) {
+            this._startServer();
+        }
+
+        // if already scheduled, don't reschedule
+        if (this._retryTimer) {
+            console.log("[Retry] Already scheduled");
             return;
         }
 
-        await this.ensureFileOpen();
-        await this.insertNewSegment();
+        this.statusBarItem.setText("Waiting for server (45s)...");
+        this._retryTimer = setTimeout(() => {
+            this._retryTimer = null;
+            this._isStartingServer = false;  // reset for next retry
+            this._tryConnect();
+        }, 45000);
+    }
+
+    _startRecording() {
+        if (!this.client || this.client.destroyed) {
+            new import_obsidian.Notice("Connection lost");
+            this.setState("offline");
+            return;
+        }
 
         this.isRecording = true;
         this.currentText = "";
-        this.lastText = "";
-
         this.statusBarItem.setText("Recording...");
-        this.ribbonIcon.style.backgroundColor = "#ffb3ba";
+
+        this._ensureFile();
+        this._insertSegment();
 
         new import_obsidian.Notice("Recording started");
-
         this.client.write("start\n");
     }
 
-    stopRecording() {
+    _stopRecording() {
         if (!this.isRecording) return;
 
         this.isRecording = false;
         this.statusBarItem.setText("Stopped");
-        this.ribbonIcon.style.backgroundColor = "#ffd966";
 
-        // 确保内容已保存
         if (this.currentText) {
-            this.updateNote();
+            this._updateNote();
         }
-
-        new import_obsidian.Notice("Recording stopped");
 
         if (this.client && !this.client.destroyed) {
             this.client.write("stop\n");
         }
-    }
 
-    async ensureFileOpen() {
-        var now = new Date();
-        var dateStr = now.toISOString().slice(0, 10);
-        var dirPath = "00.raw/01.投资研究/音频转录";
-        var filename = dirPath + "/转录_" + dateStr + ".md";
+        new import_obsidian.Notice("Stopped");
 
-        var dir = this.app.vault.getAbstractFileByPath(dirPath);
-        if (!dir) {
-            await this.app.vault.createFolder(dirPath);
-        }
-
-        var file = this.app.vault.getAbstractFileByPath(filename);
-        if (!file) {
-            file = await this.app.vault.create(filename, `# 转录记录 (${dateStr})\n\n`);
-        }
-
-        this.currentFile = filename;
-
-        var leaves = this.app.workspace.getLeavesOfType("markdown");
-        var alreadyOpen = false;
-        for (var i = 0; i < leaves.length; i++) {
-            if (leaves[i].view && leaves[i].view.file && leaves[i].view.file.path === filename) {
-                alreadyOpen = true;
-                break;
-            }
-        }
-
-        if (!alreadyOpen) {
-            this.app.workspace.getLeaf(true).openFile(file);
+        // go to stopped state (keep connection)
+        if (this.state === "recording") {
+            this.setState("stopped");
         }
     }
 
-    async insertNewSegment() {
-        var now = new Date();
-        var timeStr = now.toLocaleString("zh-CN", {
-            year: "numeric", month: "2-digit", day: "2-digit",
-            hour: "2-digit", minute: "2-digit", second: "2-digit"
-        });
+    _resumeRecording() {
+        if (this.state !== "stopped") return;
 
-        // 确保文件存在
-        await this.ensureFileOpen();
-
-        // 直接读取文件并在末尾追加
-        var file = this.app.vault.getAbstractFileByPath(this.currentFile);
-        if (!file) return;
-
-        var content = await this.app.vault.read(file);
-
-        // 追加新片段
-        var newSegment = "\n---\n### " + timeStr + "\n";
-        await this.app.vault.modify(file, content + newSegment);
-
-        // 同步编辑器
-        var activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-        if (activeView && activeView.file && activeView.file.path === this.currentFile) {
-            var editor = activeView.editor;
-            editor.setValue(content + newSegment);
+        if (!this.client || this.client.destroyed) {
+            new import_obsidian.Notice("Connection lost, reconnecting...");
+            this._tryConnect();
+            return;
         }
+
+        this.setState("recording");
+        this._startRecording();
     }
 
-    async updateNote() {
-        if (this.currentText === "") return;
-
-        var file = this.app.vault.getAbstractFileByPath(this.currentFile);
-        if (!file) return;
-
-        var content = await this.app.vault.read(file);
-
-        var lastHeaderIdx = content.lastIndexOf("### ");
-        if (lastHeaderIdx < 0) return;
-
-        var afterHeader = content.indexOf("\n", lastHeaderIdx);
-        if (afterHeader < 0) return;
-        afterHeader++;
-
-        var nextDivider = content.indexOf("\n---", afterHeader);
-
-        var before = content.substring(0, afterHeader);
-        var after = nextDivider > 0 ? content.substring(nextDivider) : "";
-
-        var newContent = before + this.currentText + "\n" + after;
-
-        await this.app.vault.modify(file, newContent);
-
-        var activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-        if (activeView && activeView.file && activeView.file.path === this.currentFile) {
-            var editor = activeView.editor;
-            editor.setValue(newContent);
-            editor.setCursor({ line: editor.lineCount() - 1, ch: 0 });
-        }
+    _forceOffline() {
+        this.state = "offline";
+        this.isRecording = false;
+        this.ribbonIcon.style.backgroundColor = this._colors.offline;
+        this.ribbonIcon.setAttribute("aria-label", this._labels.offline);
+        this.statusBarItem.setText("Click to connect");
+        console.log("[State] -> offline (forced)");
     }
 
-    disconnect() {
-        // 先保存当前内容
-        if (this.currentText) {
-            this.updateNoteSync();
+    _cleanup() {
+        this._isIntentionalClose = true;
+        this._isStartingServer = false;
+        this.isRecording = false;
+
+        if (this._retryTimer) {
+            clearTimeout(this._retryTimer);
+            this._retryTimer = null;
         }
 
         if (this.client) {
@@ -333,25 +294,114 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
             try { this.client.destroy(); } catch(e) {}
             this.client = null;
         }
+
         if (this.serverProcess) {
             try { this.serverProcess.kill(); } catch(e) {}
             this.serverProcess = null;
         }
     }
 
-    // 同步保存（用于关闭时）
-    updateNoteSync() {
+    _handleData(text) {
+        if (!this.isRecording) return;
+        if (/^OK/.test(text.trim())) return;
+        if (/^(Recording|Transcription|Model|Server|Loading)/.test(text.trim())) return;
+
+        text = text.replace(/\x1b\[[0-9;]*m/g, "");
+        text = text.replace(/<\|[^|]*\|>/g, "");
+        text = text.replace(/^.*100%.*$/gm, "");
+        text = text.replace(/^.*\|.*$/gm, "");
+
+        var matches = text.match(/[一-鿿-a-zA-Z0-9.,!?;:，。！？；：""''（）【】《》\s\n]+/g);
+        if (!matches) return;
+
+        var extracted = matches.join("");
+        if (!extracted || extracted.length === 0) return;
+
+        extracted = extracted.replace(/<br\s*>/gi, "\n");
+
+        this.currentText += extracted;
+        var preview = extracted.replace(/\n/g, "").slice(-20) || "...";
+        this.statusBarItem.setText(preview);
+        this._updateNote();
+    }
+
+    _ensureFile() {
+        var now = new Date();
+        var dateStr = now.toISOString().slice(0, 10);
+        var dirPath = "00.raw/01.投资研究/音频转录";
+        var filename = dirPath + "/转录_" + dateStr + ".md";
+
+        var dir = this.app.vault.getAbstractFileByPath(dirPath);
+        if (!dir) {
+            this.app.vault.createFolder(dirPath);
+        }
+
+        var file = this.app.vault.getAbstractFileByPath(filename);
+        if (!file) {
+            this.app.vault.create(filename, "# Transcription (" + dateStr + ")\n\n");
+        }
+
+        this.currentFile = filename;
+    }
+
+    _insertSegment() {
+        var self = this;
+        var now = new Date();
+        var timeStr = now.toLocaleString("zh-CN", {
+            year: "numeric", month: "2-digit", day: "2-digit",
+            hour: "2-digit", minute: "2-digit", second: "2-digit"
+        });
+
+        this._ensureFile();
+        var file = this.app.vault.getAbstractFileByPath(this.currentFile);
+        if (!file) return;
+
+        this.app.vault.read(file).then(function(content) {
+            var newSegment = "\n---\n### " + timeStr + "\n";
+            self.app.vault.modify(file, content + newSegment);
+        });
+    }
+
+    _updateNote() {
+        var self = this;
         if (!this.currentText || !this.currentFile) return;
 
-        // 使用同步方式读取和写入
+        var file = this.app.vault.getAbstractFileByPath(this.currentFile);
+        if (!file) return;
+
+        this.app.vault.read(file).then(function(content) {
+            var lastHeaderIdx = content.lastIndexOf("### ");
+            if (lastHeaderIdx < 0) return;
+
+            var afterHeader = content.indexOf("\n", lastHeaderIdx);
+            if (afterHeader < 0) return;
+            afterHeader++;
+
+            var nextDivider = content.indexOf("\n---", afterHeader);
+            var before = content.substring(0, afterHeader);
+            var after = nextDivider > 0 ? content.substring(nextDivider) : "";
+
+            var newContent = before + self.currentText + "\n" + after;
+
+            self.app.vault.modify(file, newContent);
+
+            var activeView = self.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+            if (activeView && activeView.file && activeView.file.path === self.currentFile) {
+                activeView.editor.setValue(newContent);
+                activeView.editor.setCursor({ line: activeView.editor.lineCount() - 1, ch: 0 });
+            }
+        });
+    }
+
+    _saveSync() {
+        if (!this.currentText || !this.currentFile) return;
+
         var fs = require("fs");
         var path = require("path");
-        var vaultPath = this.app.vault.adapter.basePath;
-        var filePath = path.join(vaultPath, this.currentFile);
+        var filePath = path.join(this.app.vault.adapter.basePath, this.currentFile);
 
         try {
             var content = fs.readFileSync(filePath, "utf-8");
-
             var lastHeaderIdx = content.lastIndexOf("### ");
             if (lastHeaderIdx >= 0) {
                 var afterHeader = content.indexOf("\n", lastHeaderIdx);
@@ -362,11 +412,10 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
                     var after = nextDivider > 0 ? content.substring(nextDivider) : "";
                     var newContent = before + this.currentText + "\n" + after;
                     fs.writeFileSync(filePath, newContent, "utf-8");
-                    console.log("Saved final content to file");
                 }
             }
         } catch(e) {
-            console.error("Failed to save:", e);
+            console.error("[File] Save failed:", e);
         }
     }
 };
