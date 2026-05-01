@@ -111,6 +111,13 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
         }
     }
 
+    _cancelRetryTimer() {
+        if (this._retryTimer) {
+            clearTimeout(this._retryTimer);
+            this._retryTimer = null;
+        }
+    }
+
     _tryConnect() {
         var self = this;
 
@@ -155,6 +162,7 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
             console.log("[TCP] Connected");
             new import_obsidian.Notice("Connected to server");
             self._isStartingServer = false;  // reset flag
+            self._cancelRetryTimer();  // cancel any pending retry
 
             // connected -> start recording
             self.setState("recording");
@@ -203,11 +211,8 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
             this._startServer();
         }
 
-        // if already scheduled, don't reschedule
-        if (this._retryTimer) {
-            console.log("[Retry] Already scheduled");
-            return;
-        }
+        // cancel any existing timer before scheduling new one
+        this._cancelRetryTimer();
 
         this.statusBarItem.setText("Waiting for server (45s)...");
         this._retryTimer = setTimeout(() => {
@@ -283,11 +288,7 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
         this._isIntentionalClose = true;
         this._isStartingServer = false;
         this.isRecording = false;
-
-        if (this._retryTimer) {
-            clearTimeout(this._retryTimer);
-            this._retryTimer = null;
-        }
+        this._cancelRetryTimer();
 
         if (this.client) {
             try { this.client.write("quit\n"); } catch(e) {}
@@ -306,18 +307,11 @@ var FunASRTranscribe = class extends import_obsidian.Plugin {
         if (/^OK/.test(text.trim())) return;
         if (/^(Recording|Transcription|Model|Server|Loading)/.test(text.trim())) return;
 
-        text = text.replace(/\x1b\[[0-9;]*m/g, "");
-        text = text.replace(/<\|[^|]*\|>/g, "");
-        text = text.replace(/^.*100%.*$/gm, "");
-        text = text.replace(/^.*\|.*$/gm, "");
-
         var matches = text.match(/[一-鿿-a-zA-Z0-9.,!?;:，。！？；：""''（）【】《》\s\n]+/g);
         if (!matches) return;
 
         var extracted = matches.join("");
         if (!extracted || extracted.length === 0) return;
-
-        extracted = extracted.replace(/<br\s*>/gi, "\n");
 
         this.currentText += extracted;
         var preview = extracted.replace(/\n/g, "").slice(-20) || "...";
