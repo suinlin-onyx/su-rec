@@ -20,6 +20,7 @@ export default class SuRecPlugin extends Plugin {
   private currentFile = ''
   private currentText = ''
   private autoStartRecording = false  // 标记：连接成功后自动开始录音
+  private writtenTexts = new Set<string>()  // 已写入的文本集合，用于去重
 
   async onload() {
     this.settings = new ResourceManager(this, DEFAULT_SETTINGS)
@@ -139,6 +140,7 @@ export default class SuRecPlugin extends Plugin {
   private startRecording(): void {
     this.messageBridge.sendAction('start_recording')
     this.currentText = ''
+    this.writtenTexts.clear()  // 清空去重记录
 
     // 检查当前文件是否是今天的日期，不是则重置以创建新文件
     if (this.currentFile && !this.isTodayFile(this.currentFile)) {
@@ -161,9 +163,7 @@ export default class SuRecPlugin extends Plugin {
 
   private stopRecording(): void {
     this.messageBridge.sendAction('stop_recording')
-    if (this.currentText) {
-      this.updateNote()
-    }
+    // currentText 已在增量追加时写入文件，无需额外操作
     new Notice('停止录音')
   }
 
@@ -200,9 +200,11 @@ export default class SuRecPlugin extends Plugin {
       case 'transcription':
         if (msg.payload?.text) {
           this.currentText += msg.payload.text
+          // 增量追加到文件，只写入新收到的文本
+          this.appendToNote(msg.payload.text)
+          // 底部右下角状态栏显示最新内容（去掉换行）
           const preview = msg.payload.text.replace(/\n/g, '').slice(-20) || '...'
           this.setStatusBarText(preview)
-          this.updateNote()
         }
         break
 
@@ -271,59 +273,40 @@ export default class SuRecPlugin extends Plugin {
     if (!file) return
 
     this.app.vault.read(file).then((content: string) => {
-      const newSegment = `\n---\n### ${timeStr}\n`
+      const newSegment = `\n\n---\n### ${timeStr}\n`
       this.app.vault.modify(file, content + newSegment)
     })
   }
 
-  private updateNote(): void {
-    const self = this
-    if (!this.currentText || !this.currentFile) return
+  private appendToNote(newText: string): void {
+    // 增量追加：只追加新收到的文本，去重处理
+    if (!newText || !this.currentFile) return
+
+    // 去重：检查是否已写入过完全相同的文本
+    if (this.writtenTexts.has(newText)) {
+      console.log('[SuRec] Duplicate text skipped:', newText.slice(0, 30))
+      return
+    }
+
+    // 新时间段落前加换行符
+    let textToWrite = newText
+    if (newText.startsWith('[')) {
+      textToWrite = '\n' + newText
+    }
 
     const file = this.app.vault.getAbstractFileByPath(this.currentFile)
     if (!file) return
 
     this.app.vault.read(file).then((content: string) => {
-      const lastHeaderIdx = content.lastIndexOf('### ')
-      if (lastHeaderIdx < 0) return
-
-      const afterHeader = content.indexOf('\n', lastHeaderIdx)
-      if (afterHeader < 0) return
-      const nextDivider = content.indexOf('\n---', afterHeader)
-      const before = content.substring(0, afterHeader + 1)
-      const after = nextDivider > 0 ? content.substring(nextDivider) : ''
-
-      const newContent = before + self.currentText + '\n' + after
-      self.app.vault.modify(file, newContent)
+      const newContent = content + textToWrite
+      this.app.vault.modify(file, newContent)
+      this.writtenTexts.add(newText)  // 记录已写入的文本
     })
   }
 
   private saveSync(): void {
-    if (!this.currentText || !this.currentFile) return
-
-    const fs = require('fs') as typeof import('fs')
-    const path = require('path') as typeof import('path')
-
-    // Use vault adapter basePath via DataAdapter
-    const basePath = (this.app.vault as unknown as { adapter: { basePath: string } }).adapter.basePath
-    const filePath = path.join(basePath, this.currentFile)
-
-    try {
-      const content = fs.readFileSync(filePath, 'utf-8')
-      const lastHeaderIdx = content.lastIndexOf('### ')
-      if (lastHeaderIdx >= 0) {
-        const afterHeader = content.indexOf('\n', lastHeaderIdx)
-        if (afterHeader >= 0) {
-          const nextDivider = content.indexOf('\n---', afterHeader)
-          const before = content.substring(0, afterHeader + 1)
-          const after = nextDivider > 0 ? content.substring(nextDivider) : ''
-          const newContent = before + this.currentText + '\n' + after
-          fs.writeFileSync(filePath, newContent, 'utf-8')
-        }
-      }
-    } catch (e) {
-      console.error('[SuRec] Save failed:', e)
-    }
+    // 文本已在 appendToNote 时增量写入，此处无需额外操作
+    // currentText 仅用于内存中的状态追踪
   }
 
   private cleanup(): void {
