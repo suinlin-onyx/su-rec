@@ -7,25 +7,7 @@ export interface ServiceMonitorConfig {
   cwd: string
 }
 
-interface ChildProcess {
-  pid?: number
-  kill(): void
-  on(event: 'close', cb: (code: number) => void): void
-}
-
-interface NetSocket {
-  setTimeout(ms: number): void
-  connect(port: number, host: string): void
-  destroy(): void
-  on(event: 'connect' | 'timeout' | 'error', cb: () => void): void
-}
-
-interface ChildProcessModule {
-  spawn(cmd: string, args: string[], options: object): ChildProcess
-}
-
 export class ServiceMonitor {
-  private process: ChildProcess | null = null
   private isStarting = false
 
   constructor(private config: ServiceMonitorConfig) {}
@@ -34,7 +16,7 @@ export class ServiceMonitor {
     return new Promise((resolve) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const net = require('net') as any
-      const socket: NetSocket = new net.Socket()
+      const socket = new net.Socket()
 
       socket.setTimeout(1000)
 
@@ -71,13 +53,65 @@ export class ServiceMonitor {
     this.isStarting = true
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const child_process: any = require('child_process')
-      this.process = child_process.spawn('cmd', ['/c', 'start', '/B', 'py', '-3.11', this.config.serverPath], {
-        cwd: this.config.cwd,
-        shell: false,
-        detached: false
-      })
+      if (this.config.autoStart) {
+        console.log('[ServiceMonitor] Attempting to start service...')
+
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const cp: any = require('child_process')
+
+          // Try multiple methods to hide console window
+          let child = null
+
+          // Method 1: Try pythonw.exe with full path (Python 3.11 default location)
+          const pythonwPaths = [
+            'C:\\Users\\tuoyi5\\AppData\\Local\\Programs\\Python\\Python311\\pythonw.exe',
+            'C:\\Python311\\pythonw.exe',
+          ]
+
+          for (const pythonwPath of pythonwPaths) {
+            try {
+              child = cp.spawn(pythonwPath, [this.config.serverPath], {
+                cwd: this.config.cwd,
+                detached: true,
+                stdio: 'ignore'
+              })
+              console.log('[ServiceMonitor] Using pythonw:', pythonwPath)
+              break
+            } catch (e) {
+              // Try next path
+            }
+          }
+
+          // Method 2: If no pythonw found, use py launcher with CREATE_NO_WINDOW
+          if (!child) {
+            const child_process = cp.spawn('py', ['-3.11', '-X', 'utf8', this.config.serverPath], {
+              cwd: this.config.cwd,
+              detached: true,
+              stdio: 'ignore',
+              windowsHide: true,
+              shell: false
+            })
+            child = child_process
+            console.log('[ServiceMonitor] Using py launcher with hidden window')
+          }
+
+          // Unref so parent process doesn't wait for child
+          child.unref()
+
+          child.on('error', (err: Error) => {
+            console.error('[ServiceMonitor] Process error:', err)
+          })
+
+          child.on('close', (code: number) => {
+            console.log('[ServiceMonitor] Process exited with code:', code)
+          })
+
+          console.log('[ServiceMonitor] Service start command executed')
+        } catch (e) {
+          console.error('[ServiceMonitor] Failed to spawn process:', e)
+        }
+      }
 
       const result = await this.waitForService(this.config.startTimeout)
       return result
@@ -102,18 +136,8 @@ export class ServiceMonitor {
   }
 
   stopService(): void {
-    if (this.process) {
-      try {
-        this.process.kill()
-      } catch (e) {
-        console.error('[ServiceMonitor] Failed to stop service:', e)
-      }
-      this.process = null
-    }
-  }
-
-  getProcess(): ChildProcess | null {
-    return this.process
+    // No process to stop in renderer context
+    console.log('[ServiceMonitor] Service stop requested (no-op in renderer)')
   }
 
   private sleep(ms: number): Promise<void> {

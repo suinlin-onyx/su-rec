@@ -33,8 +33,8 @@ export default class SuRecPlugin extends Plugin {
       port: pluginSettings.serverPort,
       autoStart: pluginSettings.autoStartServer,
       startTimeout: pluginSettings.serverStartTimeout,
-      serverPath: 'D:\\arvin\\obsidian_workpace\\voice-transcribe\\transcribe_server_v3.py',
-      cwd: 'D:\\arvin\\obsidian_workpace\\voice-transcribe'
+      serverPath: 'run.py',
+      cwd: 'D:\\arvin\\obsidian_workpace\\su_obs_voice\\voice-transcribe'
     })
 
     this.connectionManager = new ConnectionManager(
@@ -139,9 +139,24 @@ export default class SuRecPlugin extends Plugin {
   private startRecording(): void {
     this.messageBridge.sendAction('start_recording')
     this.currentText = ''
+
+    // 检查当前文件是否是今天的日期，不是则重置以创建新文件
+    if (this.currentFile && !this.isTodayFile(this.currentFile)) {
+      this.currentFile = ''
+    }
+
     this.ensureFile()
     this.insertSegment()
     new Notice('开始录音')
+  }
+
+  private isTodayFile(filename: string): boolean {
+    const today = new Date()
+    const year = today.getFullYear()
+    const month = String(today.getMonth() + 1).padStart(2, '0')
+    const day = String(today.getDate()).padStart(2, '0')
+    const todayStr = `${year}-${month}-${day}`
+    return filename.includes(todayStr)
   }
 
   private stopRecording(): void {
@@ -223,7 +238,10 @@ export default class SuRecPlugin extends Plugin {
 
   private ensureFile(): void {
     const now = new Date()
-    const dateStr = now.toISOString().slice(0, 10)
+    const year = now.getFullYear()
+    const month = String(now.getMonth() + 1).padStart(2, '0')
+    const day = String(now.getDate()).padStart(2, '0')
+    const dateStr = `${year}-${month}-${day}`
     const folderPath = this.settings.getSettings().outputFolder
     const filename = `${folderPath}/转录_${dateStr}.md`
 

@@ -8,5 +8,5 @@
 	"authorUrl": "",
 	"fundingUrl": "",
 	"isDesktopOnly": true,
-	"main": "dist/main.js"
+	"main": "main.js"
 }
