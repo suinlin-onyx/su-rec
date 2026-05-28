@@ -100,8 +100,6 @@ export interface PluginSettings {
   reconnectBaseDelay: number
   autoStartServer: boolean
   serverStartTimeout: number
-  vadMode: 'manual' | 'auto'
-  maxSilenceDuration: number
   outputFolder: string
   debugMode: boolean
   logLevel: 'error' | 'warn' | 'info' | 'debug'
@@ -117,8 +115,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   reconnectBaseDelay: 1000,
   autoStartServer: true,
   serverStartTimeout: 60000,
-  vadMode: 'auto',
-  maxSilenceDuration: 3,
   outputFolder: '00.raw/01.投资研究/音频转录',
   debugMode: false,
   logLevel: 'info',

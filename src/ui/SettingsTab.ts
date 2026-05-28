@@ -138,33 +138,6 @@ function buildSettingsUI(
       })
     })
 
-  heading(el, '录音设置')
-
-  new Setting(el)
-    .setName('VAD 模式')
-    .setDesc('语音活动检测模式')
-    .addDropdown(dropdown => {
-      dropdown.addOption('auto', '自动')
-      dropdown.addOption('manual', '手动')
-      dropdown.setValue(settings.vadMode)
-      dropdown.onChange(async (value) => {
-        store.updateSettings({ vadMode: value as 'auto' | 'manual' })
-        await store.save()
-      })
-    })
-
-  new Setting(el)
-    .setName('最大静音时长')
-    .setDesc('检测为静音后自动输出的等待时间（秒）')
-    .addText(text => {
-      text.setValue(String(settings.maxSilenceDuration))
-      text.inputEl.addClass('surec-text-input')
-      text.onChange(async (value) => {
-        store.updateSettings({ maxSilenceDuration: parseInt(value) || 3 })
-        await store.save()
-      })
-    })
-
   heading(el, '输出设置')
 
   new Setting(el)
