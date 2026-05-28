@@ -11,6 +11,7 @@ const STATE_DISPLAY_MAP: Record<ServerStatus, DisplayInfo> = {
   idle: { label: '空闲', color: '#888888', icon: 'circle', statusBarText: '就绪' },
   connected: { label: '已连接', color: '#4488ff', icon: 'wifi', statusBarText: '已连接' },
   downloading_model: { label: '下载模型', color: '#ff8800', icon: 'download', statusBarText: '下载模型中...' },
+  loading: { label: '加载中', color: '#ffaa00', icon: 'loader', statusBarText: '加载中...' },
   model_loaded: { label: '模型就绪', color: '#44ff44', icon: 'check-circle', statusBarText: '模型就绪' },
   recognizing: { label: '识别中', color: '#44ff44', icon: 'mic', statusBarText: '识别中...' },
   no_audio: { label: '无音频', color: '#ff4444', icon: 'alert-triangle', statusBarText: '无音频输入' },

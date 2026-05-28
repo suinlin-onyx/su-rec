@@ -4,9 +4,11 @@ import { MessageBridge } from './core/MessageBridge'
 import { StateController } from './core/StateController'
 import { ServiceMonitor } from './core/ServiceMonitor'
 import { ResourceManager } from './core/ResourceManager'
-import { SuRecSettingsModal } from './ui/SettingsTab'
+import { SuRecPluginSettingTab } from './ui/SettingsTab'
 import { DEFAULT_SETTINGS } from './types'
 import type { ServerMessage, CompositeState } from './types'
+
+const MAX_PORT_SCAN = 10  // P0 .. P0+10
 
 export default class SuRecPlugin extends Plugin {
   settings!: ResourceManager
@@ -19,8 +21,9 @@ export default class SuRecPlugin extends Plugin {
   private statusBarEl: HTMLElement | null = null
   private currentFile = ''
   private currentText = ''
-  private autoStartRecording = false  // 标记：连接成功后自动开始录音
-  private writtenTexts = new Set<string>()  // 已写入的文本集合，用于去重
+  private autoStartRecording = false
+  private writtenTexts = new Set<string>()
+  private servicePollTimer: number | null = null
 
   async onload() {
     this.settings = new ResourceManager(this, DEFAULT_SETTINGS)
@@ -35,7 +38,9 @@ export default class SuRecPlugin extends Plugin {
       autoStart: pluginSettings.autoStartServer,
       startTimeout: pluginSettings.serverStartTimeout,
       serverPath: 'run.py',
-      cwd: 'D:\\arvin\\obsidian_workpace\\su_obs_voice\\voice-transcribe'
+      cwd: 'D:\\arvin\\obsidian_workpace\\su_obs_voice\\voice-transcribe',
+      debugMode: pluginSettings.debugMode,
+      pythonPath: pluginSettings.pythonPath,
     })
 
     this.connectionManager = new ConnectionManager(
@@ -61,7 +66,7 @@ export default class SuRecPlugin extends Plugin {
 
     this.createRibbonIcon()
     this.createStatusBar()
-    this.addSettingIcon()
+    this.addSettingTab(new SuRecPluginSettingTab(this.app, this))
 
     console.log('[SuRec] Plugin loaded')
   }
@@ -87,14 +92,6 @@ export default class SuRecPlugin extends Plugin {
     this.updateUI(this.stateController.getCompositeState())
   }
 
-  private addSettingIcon(): void {
-    this.addRibbonIcon('settings', 'SuRec Settings', () => {
-      // Create a modal for settings
-      const modal = new SuRecSettingsModal(this.app, this.settings)
-      modal.open()
-    })
-  }
-
   private onRibbonClick(): void {
     const { base } = this.stateController.getCompositeState()
 
@@ -105,44 +102,146 @@ export default class SuRecPlugin extends Plugin {
       if (server === 'recognizing') {
         this.stopRecording()
       } else {
-        // 用户主动点击时，关闭自动启动标记，直接开始录音
         this.autoStartRecording = false
         this.startRecording()
       }
     }
   }
 
+  // ============ 端口扫描 & 连接 ============
+
   private async tryConnect(): Promise<void> {
+    this.clearServicePoll()
+
+    // 从最新设置刷新 ServiceMonitor 配置（debugMode / pythonPath 可能已变化）
+    const s = this.settings.getSettings()
+    this.serviceMonitor.updateConfig({
+      debugMode: s.debugMode,
+      pythonPath: s.pythonPath,
+      autoStart: s.autoStartServer,
+    })
+
     this.stateController.updateBaseState('connecting')
     this.setStatusBarText('检查服务状态...')
-    this.autoStartRecording = true  // 标记：连接成功后自动开始录音
+    this.autoStartRecording = true
+
+    const basePort = s.serverPort
+
+    // 阶段 1: 端口扫描 — 找到可用端口或已有服务
+    for (let offset = 0; offset <= MAX_PORT_SCAN; offset++) {
+      const p = basePort + offset
+      const running = await this.serviceMonitor.isServiceRunning(p)
+
+      if (!running) {
+        // 端口空闲 → 在此端口启动服务
+        console.log(`[SuRec] Port ${p} is free, starting service...`)
+        await this.startAndConnect(p)
+        return
+      }
+
+      // 端口被占用 → 尝试 WebSocket 连接
+      const wsOk = await this.tryWsConnect(p)
+      if (wsOk) {
+        // 是 su-rec 服务端
+        console.log(`[SuRec] Found service on port ${p}`)
+        return
+      }
+
+      // 被其他程序占用 → 递增端口
+      console.log(`[SuRec] Port ${p} occupied by non-su-rec process, trying next...`)
+    }
+
+    // 阶段 2: 所有端口都被非 su-rec 程序占用
+    // 在 basePort 启动（它可能只是被暂用，再试一次）
+    console.log('[SuRec] All ports occupied, forcing start on base port')
+    await this.startAndConnect(basePort)
+  }
+
+  /** 尝试 WebSocket 连接，返回是否成功 */
+  private async tryWsConnect(port: number): Promise<boolean> {
+    try {
+      await this.connectionManager.connect(port)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 启动服务并连接 */
+  private async startAndConnect(port: number): Promise<void> {
+    this.setStatusBarText('启动服务中...')
 
     try {
-      const serviceRunning = await this.serviceMonitor.ensureServiceRunning()
-      if (!serviceRunning) {
-        new Notice('服务启动失败，请手动启动 FunASR 服务')
+      const started = await this.serviceMonitor.startService(port)
+      if (!started) {
+        new Notice(this.serviceMonitor.lastError || '服务启动失败，请手动启动')
         this.stateController.updateBaseState('disconnected')
         this.autoStartRecording = false
         return
       }
 
-      await this.connectionManager.connect()
-      // 不在这里发送 start_recording，等待服务端 connected 状态
+      // 轮询等待端口 open 后连接
+      await this.connectionManager.connect(port)
 
     } catch (e) {
       console.error('[SuRec] Connect failed:', e)
       new Notice('连接失败')
       this.stateController.updateBaseState('disconnected')
       this.autoStartRecording = false
+
+      if (this.settings.getSettings().autoReconnect) {
+        this.startServicePoll()
+      }
     }
   }
+
+  /** Keep polling the service port until it becomes available, then connect. */
+  private startServicePoll(): void {
+    this.clearServicePoll()
+    const settings = this.settings.getSettings()
+    if (!settings.autoReconnect) return
+
+    const poll = async () => {
+      const state = this.stateController.getCompositeState().base
+      if (state === 'connected') return
+
+      // 刷新配置
+      const s = this.settings.getSettings()
+      this.serviceMonitor.updateConfig({
+        debugMode: s.debugMode,
+        autoStart: s.autoStartServer,
+      })
+
+      const running = await this.serviceMonitor.isServiceRunning(s.serverPort)
+      if (running) {
+        console.log('[SuRec] Service detected, connecting...')
+        this.setStatusBarText('服务已就绪，正在连接...')
+        try {
+          await this.connectionManager.connect(s.serverPort)
+        } catch {
+          // Will retry on next poll
+        }
+      }
+    }
+
+    poll()
+    this.servicePollTimer = window.setInterval(poll, 2000)
+  }
+
+  private clearServicePoll(): void {
+    if (this.servicePollTimer !== null) {
+      clearInterval(this.servicePollTimer)
+      this.servicePollTimer = null
+    }
+  }
+
+  // ============ 录音控制 ============
 
   private startRecording(): void {
     this.messageBridge.sendAction('start_recording')
     this.currentText = ''
-    this.writtenTexts.clear()  // 清空去重记录
+    this.writtenTexts.clear()
 
-    // 检查当前文件是否是今天的日期，不是则重置以创建新文件
     if (this.currentFile && !this.isTodayFile(this.currentFile)) {
       this.currentFile = ''
     }
@@ -162,15 +261,18 @@ export default class SuRecPlugin extends Plugin {
   }
 
   private stopRecording(): void {
+    this.clearServicePoll()
+    this.autoStartRecording = false
     this.messageBridge.sendAction('stop_recording')
-    // currentText 已在增量追加时写入文件，无需额外操作
     new Notice('停止录音')
   }
+
+  // ============ 事件处理 ============
 
   private onConnectionStateChange(state: string): void {
     if (state === 'disconnected') {
       this.stateController.updateBaseState('disconnected')
-      this.autoStartRecording = false  // 重置自动开始标记
+      // ConnectionManager 内部已有 scheduleReconnect，此处不再启动重复的轮询
     }
   }
 
@@ -180,13 +282,15 @@ export default class SuRecPlugin extends Plugin {
     switch (msg.type) {
       case 'state_update':
       case 'state_response':
-        // 检查是否是服务端返回的 connected 状态
         if (msg.status === 'connected') {
           this.stateController.updateBaseState('connected')
           new Notice('已连接到服务器')
-          // 连接成功，等待服务端再次推送 model_loaded 后再开始录音
+        } else if (msg.status === 'loading') {
+          // 显示加载进度
+          const progressMsg = msg.payload?.message || '加载中...'
+          this.setStatusBarText(progressMsg)
+          this.stateController.updateServerState('loading')
         } else if (msg.status === 'model_loaded' && this.autoStartRecording) {
-          // 服务端模型加载完成，现在可以开始录音
           this.autoStartRecording = false
           this.messageBridge.sendAction('start_recording')
           this.currentText = ''
@@ -200,9 +304,7 @@ export default class SuRecPlugin extends Plugin {
       case 'transcription':
         if (msg.payload?.text) {
           this.currentText += msg.payload.text
-          // 增量追加到文件，只写入新收到的文本
           this.appendToNote(msg.payload.text)
-          // 底部右下角状态栏显示最新内容（去掉换行）
           const preview = msg.payload.text.replace(/\n/g, '').slice(-20) || '...'
           this.setStatusBarText(preview)
         }
@@ -221,6 +323,8 @@ export default class SuRecPlugin extends Plugin {
     new Notice('连接错误')
   }
 
+  // ============ UI 更新 ============
+
   private updateUI(state: CompositeState): void {
     const displayInfo = this.stateController.getDisplayInfo()
 
@@ -237,6 +341,8 @@ export default class SuRecPlugin extends Plugin {
       this.statusBarEl.textContent = text
     }
   }
+
+  // ============ 文件写入 ============
 
   private ensureFile(): void {
     const now = new Date()
@@ -279,16 +385,13 @@ export default class SuRecPlugin extends Plugin {
   }
 
   private appendToNote(newText: string): void {
-    // 增量追加：只追加新收到的文本，去重处理
     if (!newText || !this.currentFile) return
 
-    // 去重：检查是否已写入过完全相同的文本
     if (this.writtenTexts.has(newText)) {
       console.log('[SuRec] Duplicate text skipped:', newText.slice(0, 30))
       return
     }
 
-    // 新时间段落前加换行符
     let textToWrite = newText
     if (newText.startsWith('[')) {
       textToWrite = '\n' + newText
@@ -300,16 +403,16 @@ export default class SuRecPlugin extends Plugin {
     this.app.vault.read(file).then((content: string) => {
       const newContent = content + textToWrite
       this.app.vault.modify(file, newContent)
-      this.writtenTexts.add(newText)  // 记录已写入的文本
+      this.writtenTexts.add(newText)
     })
   }
 
   private saveSync(): void {
-    // 文本已在 appendToNote 时增量写入，此处无需额外操作
-    // currentText 仅用于内存中的状态追踪
+    // 文本已在 appendToNote 中增量写入
   }
 
   private cleanup(): void {
+    this.clearServicePoll()
     this.connectionManager?.disconnect()
     this.serviceMonitor?.stopService()
   }

@@ -1,183 +1,62 @@
-import { Setting, Modal } from 'obsidian'
+import { PluginSettingTab, Setting, Modal } from 'obsidian'
+import type SuRecPlugin from '../main'
 import type { PluginSettings } from '../types'
+import { ServiceMonitor } from '../core/ServiceMonitor'
+
+/** Standard Obsidian settings tab — gear icon in Settings → Community plugins. */
+export class SuRecPluginSettingTab extends PluginSettingTab {
+  id = 'su-rec'
+  name = 'SuRec'
+  plugin: SuRecPlugin
+
+  constructor(app: import('obsidian').App, plugin: SuRecPlugin) {
+    super(app, plugin)
+    this.plugin = plugin
+  }
+
+  display(): void {
+    const { containerEl } = this
+    const settings = this.plugin.settings.getSettings()
+    containerEl.empty()
+    containerEl.addClass('surec-settings')
+
+    buildSettingsUI(containerEl, settings, this.plugin.settings)
+  }
+}
+
+// ── Modal (ribbon icon fallback) ──────────────────────────────
 
 export class SuRecSettingsTab {
   private settings: PluginSettings
 
   constructor(
     private containerEl: HTMLElement,
-    private settingsManager: {
+    private store: {
       getSettings(): PluginSettings
       updateSettings(partial: Partial<PluginSettings>): void
       save(): Promise<void>
     }
   ) {
-    this.settings = this.settingsManager.getSettings()
+    this.settings = this.store.getSettings()
   }
 
   display(): void {
     this.containerEl.empty()
     this.containerEl.addClass('surec-settings')
-
-    // 标题
-    const header = this.containerEl.createDiv({ cls: 'surec-settings-header' })
-    header.createEl('h2', { text: 'SuRec 设置' })
-    const descDiv = this.containerEl.createDiv({ cls: 'surec-settings-desc' })
-    descDiv.setText('FunASR 实时语音转录插件配置')
-
-    // 服务器设置
-    new Setting(this.containerEl)
-      .setName('服务器地址')
-      .setDesc('FunASR 服务器的主机地址')
-      .addText(text => {
-        text.setValue(this.settings.serverHost)
-        text.inputEl.addClass('surec-text-input')
-        text.onChange(async (value) => {
-          this.settings.serverHost = value
-          this.settingsManager.updateSettings({ serverHost: value })
-          await this.settingsManager.save()
-        })
-      })
-
-    new Setting(this.containerEl)
-      .setName('服务器端口')
-      .setDesc('FunASR WebSocket 服务器的端口号')
-      .addText(text => {
-        text.setValue(String(this.settings.serverPort))
-        text.inputEl.addClass('surec-text-input')
-        text.onChange(async (value) => {
-          this.settings.serverPort = parseInt(value) || 9876
-          this.settingsManager.updateSettings({ serverPort: this.settings.serverPort })
-          await this.settingsManager.save()
-        })
-      })
-
-    // 连接设置
-    this.createSectionHeading('连接设置')
-
-    new Setting(this.containerEl)
-      .setName('自动重连')
-      .setDesc('连接断开时自动尝试重连')
-      .addToggle(toggle => {
-        toggle.setValue(this.settings.autoReconnect)
-        toggle.onChange(async (value) => {
-          this.settings.autoReconnect = value
-          this.settingsManager.updateSettings({ autoReconnect: value })
-          await this.settingsManager.save()
-        })
-      })
-
-    new Setting(this.containerEl)
-      .setName('自动拉起服务')
-      .setDesc('当服务未运行时自动启动 FunASR 服务进程')
-      .addToggle(toggle => {
-        toggle.setValue(this.settings.autoStartServer)
-        toggle.onChange(async (value) => {
-          this.settings.autoStartServer = value
-          this.settingsManager.updateSettings({ autoStartServer: value })
-          await this.settingsManager.save()
-        })
-      })
-
-    // 录音设置
-    this.createSectionHeading('录音设置')
-
-    new Setting(this.containerEl)
-      .setName('VAD 模式')
-      .setDesc('语音活动检测模式')
-      .addDropdown(dropdown => {
-        dropdown.addOption('auto', '自动')
-        dropdown.addOption('manual', '手动')
-        dropdown.setValue(this.settings.vadMode)
-        dropdown.onChange(async (value) => {
-          this.settings.vadMode = value as 'auto' | 'manual'
-          this.settingsManager.updateSettings({ vadMode: value as 'auto' | 'manual' })
-          await this.settingsManager.save()
-        })
-      })
-
-    new Setting(this.containerEl)
-      .setName('最大静音时长')
-      .setDesc('检测为静音后自动输出的等待时间（秒）')
-      .addText(text => {
-        text.setValue(String(this.settings.maxSilenceDuration))
-        text.inputEl.addClass('surec-text-input')
-        text.onChange(async (value) => {
-          this.settings.maxSilenceDuration = parseInt(value) || 3
-          this.settingsManager.updateSettings({ maxSilenceDuration: this.settings.maxSilenceDuration })
-          await this.settingsManager.save()
-        })
-      })
-
-    // 输出设置
-    this.createSectionHeading('输出设置')
-
-    new Setting(this.containerEl)
-      .setName('输出文件夹')
-      .setDesc('转录文本的输出路径（相对于保险库根目录）')
-      .addText(text => {
-        text.setValue(this.settings.outputFolder)
-        text.inputEl.addClass('surec-text-input')
-        text.onChange(async (value) => {
-          this.settings.outputFolder = value
-          this.settingsManager.updateSettings({ outputFolder: value })
-          await this.settingsManager.save()
-        })
-      })
-
-    // 调试设置
-    this.createSectionHeading('调试')
-
-    new Setting(this.containerEl)
-      .setName('调试模式')
-      .setDesc('启用详细的控制台日志输出')
-      .addToggle(toggle => {
-        toggle.setValue(this.settings.debugMode)
-        toggle.onChange(async (value) => {
-          this.settings.debugMode = value
-          this.settingsManager.updateSettings({ debugMode: value })
-          await this.settingsManager.save()
-        })
-      })
-
-    // 状态信息
-    this.createSectionHeading('状态')
-    this.createStatusInfo()
-  }
-
-  private createSectionHeading(title: string): void {
-    const heading = this.containerEl.createDiv({ cls: 'surec-settings-heading' })
-    heading.setText(title)
-  }
-
-  private createStatusInfo(): void {
-    const statusDiv = this.containerEl.createDiv({ cls: 'surec-settings-status' })
-
-    const item1 = statusDiv.createDiv({ cls: 'surec-status-item' })
-    item1.setText('插件版本: 1.0.0')
-
-    const item2 = statusDiv.createDiv({ cls: 'surec-status-item' })
-    item2.setText('协议版本: WebSocket v1')
+    buildSettingsUI(this.containerEl, this.settings, this.store)
   }
 }
 
 export class SuRecSettingsModal extends Modal {
-  private settingsManager: {
-    getSettings(): PluginSettings
-    updateSettings(partial: Partial<PluginSettings>): void
-    save(): Promise<void>
-  }
-
   constructor(
     app: import('obsidian').App,
-    settingsManager: {
+    private store: {
       getSettings(): PluginSettings
       updateSettings(partial: Partial<PluginSettings>): void
       save(): Promise<void>
     }
   ) {
     super(app)
-    this.settingsManager = settingsManager
   }
 
   onOpen(): void {
@@ -192,12 +71,164 @@ export class SuRecSettingsModal extends Modal {
     closeBtn.onclick = () => this.close()
 
     const settingsContainer = contentEl.createDiv({ cls: 'surec-settings-container' })
-    const tab = new SuRecSettingsTab(settingsContainer, this.settingsManager)
-    tab.display()
+    buildSettingsUI(settingsContainer, this.store.getSettings(), this.store)
   }
 
   onClose(): void {
     const { contentEl } = this
     contentEl.empty()
   }
+}
+
+// ── Shared settings UI ─────────────────────────────────────────
+
+function buildSettingsUI(
+  el: HTMLElement,
+  settings: PluginSettings,
+  store: {
+    updateSettings(partial: Partial<PluginSettings>): void
+    save(): Promise<void>
+  }
+): void {
+  new Setting(el)
+    .setName('服务器地址')
+    .setDesc('FunASR 服务器的主机地址')
+    .addText(text => {
+      text.setValue(settings.serverHost)
+      text.inputEl.addClass('surec-text-input')
+      text.onChange(async (value) => {
+        store.updateSettings({ serverHost: value })
+        await store.save()
+      })
+    })
+
+  new Setting(el)
+    .setName('服务器端口')
+    .setDesc('FunASR WebSocket 服务器的端口号')
+    .addText(text => {
+      text.setValue(String(settings.serverPort))
+      text.inputEl.addClass('surec-text-input')
+      text.onChange(async (value) => {
+        store.updateSettings({ serverPort: parseInt(value) || 9876 })
+        await store.save()
+      })
+    })
+
+  heading(el, '连接设置')
+
+  new Setting(el)
+    .setName('自动重连')
+    .setDesc('连接断开时自动尝试重连')
+    .addToggle(toggle => {
+      toggle.setValue(settings.autoReconnect)
+      toggle.onChange(async (value) => {
+        store.updateSettings({ autoReconnect: value })
+        await store.save()
+      })
+    })
+
+  new Setting(el)
+    .setName('自动拉起服务')
+    .setDesc('当服务未运行时自动启动 FunASR 服务进程')
+    .addToggle(toggle => {
+      toggle.setValue(settings.autoStartServer)
+      toggle.onChange(async (value) => {
+        store.updateSettings({ autoStartServer: value })
+        await store.save()
+      })
+    })
+
+  heading(el, '录音设置')
+
+  new Setting(el)
+    .setName('VAD 模式')
+    .setDesc('语音活动检测模式')
+    .addDropdown(dropdown => {
+      dropdown.addOption('auto', '自动')
+      dropdown.addOption('manual', '手动')
+      dropdown.setValue(settings.vadMode)
+      dropdown.onChange(async (value) => {
+        store.updateSettings({ vadMode: value as 'auto' | 'manual' })
+        await store.save()
+      })
+    })
+
+  new Setting(el)
+    .setName('最大静音时长')
+    .setDesc('检测为静音后自动输出的等待时间（秒）')
+    .addText(text => {
+      text.setValue(String(settings.maxSilenceDuration))
+      text.inputEl.addClass('surec-text-input')
+      text.onChange(async (value) => {
+        store.updateSettings({ maxSilenceDuration: parseInt(value) || 3 })
+        await store.save()
+      })
+    })
+
+  heading(el, '输出设置')
+
+  new Setting(el)
+    .setName('输出文件夹')
+    .setDesc('转录文本的输出路径（相对于保险库根目录）')
+    .addText(text => {
+      text.setValue(settings.outputFolder)
+      text.inputEl.addClass('surec-text-input')
+      text.onChange(async (value) => {
+        store.updateSettings({ outputFolder: value })
+        await store.save()
+      })
+    })
+
+  heading(el, '调试')
+
+  new Setting(el)
+    .setName('调试模式')
+    .setDesc('启用后显示服务端控制台窗口和详细日志')
+    .addToggle(toggle => {
+      toggle.setValue(settings.debugMode)
+      toggle.onChange(async (value) => {
+        store.updateSettings({ debugMode: value })
+        await store.save()
+      })
+    })
+
+  // 自动检测 Python 路径
+  const detected = ServiceMonitor.autoDetectPython()
+  const detectedHint = detected ? `检测到: ${detected}` : '未检测到 Python，请手动填写'
+
+  let pythonTextInput: any = null
+
+  const pythonSetting = new Setting(el)
+    .setName('Python 路径')
+    .setDesc(`${detectedHint}。手动填写后优先生效`)
+    .addText(text => {
+      text.setValue(settings.pythonPath)
+      text.inputEl.setAttribute('placeholder', detected || '例如: C:\\Python311\\python.exe')
+      text.inputEl.addClass('surec-text-input')
+      pythonTextInput = text
+      text.onChange(async (value) => {
+        store.updateSettings({ pythonPath: value })
+        await store.save()
+      })
+    })
+
+  pythonSetting.addExtraButton(button => {
+    button.setIcon('search')
+    button.setTooltip('自动检测 Python 路径')
+    button.onClick(async () => {
+      const path = ServiceMonitor.autoDetectPython()
+      if (path) {
+        store.updateSettings({ pythonPath: path })
+        await store.save()
+        if (pythonTextInput) {
+          pythonTextInput.setValue(path)
+        }
+      }
+    })
+  })
+}
+
+function heading(el: HTMLElement, title: string): void {
+  const h = el.createDiv({ cls: 'surec-settings-heading' })
+  h.setText(title)
 }

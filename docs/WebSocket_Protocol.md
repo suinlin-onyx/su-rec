@@ -1,5 +1,7 @@
 # FunASR Server WebSocket Protocol
 
+> 相关文档：[服务端交互协议](./服务端交互协议.md) — su-rec 与 voice-transcribe 集成约定
+
 ## 概述
 
 本文档定义 FunASR 服务端与客户端之间的 WebSocket 通信协议。

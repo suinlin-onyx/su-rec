@@ -37,6 +37,7 @@ export type ServerStatus =
   | 'idle'
   | 'connected'
   | 'downloading_model'
+  | 'loading'
   | 'model_loaded'
   | 'recognizing'
   | 'no_audio'
@@ -49,6 +50,9 @@ export interface ServerPayload {
   errorMessage?: string
   modelName?: string
   downloadProgress?: number
+  step?: string
+  message?: string
+  elapsed?: number
 }
 
 // ============ 状态管理 ============
@@ -101,6 +105,7 @@ export interface PluginSettings {
   outputFolder: string
   debugMode: boolean
   logLevel: 'error' | 'warn' | 'info' | 'debug'
+  pythonPath: string
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -116,5 +121,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   maxSilenceDuration: 3,
   outputFolder: '00.raw/01.投资研究/音频转录',
   debugMode: false,
-  logLevel: 'info'
+  logLevel: 'info',
+  pythonPath: ''
 }

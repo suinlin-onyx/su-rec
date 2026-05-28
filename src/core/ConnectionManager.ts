@@ -14,24 +14,33 @@ export class ConnectionManager {
   private reconnectAttempts = 0
   private reconnectTimer: number | null = null
   private heartbeatTimer: number | null = null
+  private hasConnected = false
 
   constructor(
     private config: ConnectionConfig,
     private callbacks: ConnectionManagerCallbacks
   ) {}
 
-  async connect(url?: string): Promise<void> {
-    const targetUrl = url ?? this.buildUrl()
+  async connect(port?: number): Promise<void> {
+    // 先关闭旧连接，防止连接堆积
+    if (this.ws) {
+      try { this.ws.close() } catch {}
+      this.ws = null
+    }
+
+    const targetUrl = port != null ? this.buildUrl(port) : this.buildUrl()
     this.setState('connecting')
 
     return new Promise((resolve, reject) => {
+      let settled = false
       this.ws = new WebSocket(targetUrl)
 
       this.ws.onopen = () => {
+        settled = true
+        this.hasConnected = true
         this.setState('connected')
         this.reconnectAttempts = 0
         this.startHeartbeat()
-        // 通知外部 WebSocket 已真正建立，等待服务端发送 connected 状态
         this.callbacks.onConnected?.()
         resolve()
       }
@@ -46,11 +55,22 @@ export class ConnectionManager {
       }
 
       this.ws.onerror = () => {
-        this.callbacks.onError(new Error('WebSocket error'))
+        if (!settled) {
+          settled = true
+          reject(new Error('WebSocket connection error'))
+        }
+        // 只在从未成功连接过时才通知错误（连接后的 transient error 由 onclose 处理重连即可）
+        if (!this.hasConnected) {
+          this.callbacks.onError(new Error('WebSocket error'))
+        }
       }
 
-      this.ws.onclose = () => {
+      this.ws.onclose = (event) => {
         this.stopHeartbeat()
+        if (!settled) {
+          settled = true
+          reject(new Error(`WebSocket closed before open (code: ${event.code})`))
+        }
         if (this.state !== 'disconnected') {
           this.setState('disconnected')
           this.scheduleReconnect()
@@ -60,6 +80,7 @@ export class ConnectionManager {
   }
 
   disconnect(): void {
+    this.hasConnected = false
     this.setState('disconnected')
     this.stopHeartbeat()
     this.cancelReconnect()
@@ -132,8 +153,9 @@ export class ConnectionManager {
     }
   }
 
-  private buildUrl(): string {
+  private buildUrl(port?: number): string {
     const protocol = this.config.useSSL ? 'wss' : 'ws'
-    return `${protocol}://${this.config.serverHost}:${this.config.serverPort}`
+    const p = port ?? this.config.serverPort
+    return `${protocol}://${this.config.serverHost}:${p}`
   }
 }
