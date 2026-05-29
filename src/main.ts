@@ -1,12 +1,15 @@
 import { Plugin, Notice } from 'obsidian'
+import fixWebmDuration from 'fix-webm-duration'
 import { ConnectionManager } from './core/ConnectionManager'
 import { MessageBridge } from './core/MessageBridge'
 import { StateController } from './core/StateController'
 import { ServiceMonitor } from './core/ServiceMonitor'
 import { ResourceManager } from './core/ResourceManager'
+import { AudioRecorder } from './core/AudioRecorder'
 import { SuRecPluginSettingTab } from './ui/SettingsTab'
 import { DEFAULT_SETTINGS } from './types'
 import type { ServerMessage, CompositeState } from './types'
+import type { RecorderState } from './core/AudioRecorder'
 
 const MAX_PORT_SCAN = 10  // P0 .. P0+10
 
@@ -16,14 +19,17 @@ export default class SuRecPlugin extends Plugin {
   private messageBridge!: MessageBridge
   private stateController!: StateController
   private serviceMonitor!: ServiceMonitor
+  private audioRecorder!: AudioRecorder
 
   private ribbonEl: HTMLElement | null = null
   private statusBarEl: HTMLElement | null = null
+  private recordingIndicatorEl: HTMLElement | null = null
   private currentFile = ''
   private currentText = ''
   private autoStartRecording = false
   private writtenTexts = new Set<string>()
   private servicePollTimer: number | null = null
+  private recordingVaultPath = ''
 
   async onload() {
     this.settings = new ResourceManager(this, DEFAULT_SETTINGS)
@@ -63,6 +69,9 @@ export default class SuRecPlugin extends Plugin {
     this.messageBridge = new MessageBridge((msg) => this.connectionManager.send(msg))
 
     this.stateController.onStateChange((newState) => this.updateUI(newState))
+
+    this.initAudioRecorder()
+    this.createRecordingUI()
 
     this.createRibbonIcon()
     this.createStatusBar()
@@ -237,7 +246,7 @@ export default class SuRecPlugin extends Plugin {
 
   // ============ 录音控制 ============
 
-  private startRecording(): void {
+  private async startRecording(): Promise<void> {
     this.messageBridge.sendAction('start_recording')
     this.currentText = ''
     this.writtenTexts.clear()
@@ -246,9 +255,45 @@ export default class SuRecPlugin extends Plugin {
       this.currentFile = ''
     }
 
-    this.ensureFile()
-    this.insertSegment()
+    await this.ensureFile()
+    await this.insertSegmentAndPlaceholder()
+    this.audioRecorder.start().catch(() => {})
     new Notice('开始录音')
+  }
+
+  private async insertSegmentAndPlaceholder(): Promise<void> {
+    let file = this.app.vault.getAbstractFileByPath(this.currentFile)
+    if (!file) {
+      // 文件未创建成功，尝试直接创建
+      try {
+        file = await this.app.vault.create(this.currentFile, '')
+      } catch {
+        console.error('[SuRec] Cannot create transcription file:', this.currentFile)
+        return
+      }
+    }
+
+    const now = new Date()
+    const timeStr = now.toLocaleString('zh-CN', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    })
+    const segment = `\n\n---\n### ${timeStr}\n`
+
+    const filename = this.makeRecordingFileName()
+    const folder = this.settings.getSettings().recordingFolder || 'Recordings'
+    this.recordingVaultPath = `${folder}/${filename}`
+
+    const placeholder = `🔴 录音中 — ${filename}\n`
+
+    const content = await this.app.vault.read(file)
+    await this.app.vault.modify(file, content + segment + placeholder)
+  }
+
+  private makeRecordingFileName(): string {
+    const now = new Date()
+    const ts = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`
+    return `录音_${ts}.webm`
   }
 
   private isTodayFile(filename: string): boolean {
@@ -260,11 +305,98 @@ export default class SuRecPlugin extends Plugin {
     return filename.includes(todayStr)
   }
 
-  private stopRecording(): void {
+  private async stopRecording(): Promise<void> {
     this.clearServicePoll()
     this.autoStartRecording = false
     this.messageBridge.sendAction('stop_recording')
+
+    const durationSecs = this.audioRecorder.getElapsed()
+
+    try {
+      const blob = await this.audioRecorder.stop()
+      await this.saveRecordingFile(blob, durationSecs)
+    } catch {
+      this.audioRecorder.cancel()
+    }
     new Notice('停止录音')
+  }
+
+  private async saveRecordingFile(blob: Blob, durationSecs: number): Promise<void> {
+    const vaultPath = this.recordingVaultPath
+    if (!vaultPath) return
+
+    // 确保目录存在并写入音频文件
+    const folder = vaultPath.substring(0, vaultPath.lastIndexOf('/'))
+    await this.ensureFolder(folder)
+
+    // 修补 WebM Duration 元数据（MediaRecorder 不写入此字段）
+    const patchedBlob = await fixWebmDuration(blob, durationSecs * 1000)
+    const arrayBuf = await patchedBlob.arrayBuffer()
+    await this.app.vault.createBinary(vaultPath, arrayBuf)
+
+    // 替换占位符 → 真实 embed
+    if (this.currentFile) {
+      const note = this.app.vault.getAbstractFileByPath(this.currentFile)
+      if (note) {
+        const filename = vaultPath.substring(vaultPath.lastIndexOf('/') + 1)
+        const placeholder = `🔴 录音中 — ${filename}`
+        const embed = `![[${vaultPath}]]`
+        const content = await this.app.vault.read(note)
+        const newContent = content.replace(placeholder, embed)
+        await this.app.vault.modify(note, newContent)
+      }
+    }
+
+    this.recordingVaultPath = ''
+    this.onRecorderStateChange('done')
+  }
+
+  // ============ 自定义录音 ============
+
+  private initAudioRecorder(): void {
+    this.audioRecorder = new AudioRecorder({
+      onStateChange: (state) => this.onRecorderStateChange(state),
+      onDurationUpdate: (secs) => this.updateRecordingDuration(secs),
+      onSaved: () => {},
+      onError: (err) => new Notice(err),
+    })
+  }
+
+  private createRecordingUI(): void {
+    this.recordingIndicatorEl = this.addStatusBarItem()
+    this.recordingIndicatorEl.addClass('surec-recording-indicator')
+    this.recordingIndicatorEl.style.display = 'none'
+  }
+
+  private onRecorderStateChange(state: RecorderState): void {
+    if (!this.recordingIndicatorEl) return
+    switch (state) {
+      case 'idle':
+        this.recordingIndicatorEl.style.display = 'none'
+        break
+      case 'recording':
+        this.recordingIndicatorEl.style.display = ''
+        this.recordingIndicatorEl.setText('🔴 录音中 00:00')
+        break
+      case 'saving':
+        this.recordingIndicatorEl.setText('⏳ 保存录音...')
+        break
+      case 'done':
+        this.recordingIndicatorEl.setText('✅ 录音已保存')
+        setTimeout(() => {
+          if (this.recordingIndicatorEl && this.audioRecorder.state === 'done') {
+            this.recordingIndicatorEl.style.display = 'none'
+          }
+        }, 3000)
+        break
+    }
+  }
+
+  private updateRecordingDuration(secs: number): void {
+    if (!this.recordingIndicatorEl) return
+    const mins = Math.floor(secs / 60).toString().padStart(2, '0')
+    const sec = (secs % 60).toString().padStart(2, '0')
+    this.recordingIndicatorEl.setText(`🔴 录音中 ${mins}:${sec}`)
   }
 
   // ============ 事件处理 ============
@@ -292,11 +424,7 @@ export default class SuRecPlugin extends Plugin {
           this.stateController.updateServerState('loading')
         } else if (msg.status === 'model_loaded' && this.autoStartRecording) {
           this.autoStartRecording = false
-          this.messageBridge.sendAction('start_recording')
-          this.currentText = ''
-          this.ensureFile()
-          this.insertSegment()
-          new Notice('开始录音')
+          this.startRecording()
         }
         this.stateController.handleServerMessage(msg)
         break
@@ -344,7 +472,20 @@ export default class SuRecPlugin extends Plugin {
 
   // ============ 文件写入 ============
 
-  private ensureFile(): void {
+  private async ensureFolder(folderPath: string): Promise<void> {
+    const parts = folderPath.split('/')
+    let current = ''
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part
+      try {
+        if (!this.app.vault.getAbstractFileByPath(current)) {
+          await this.app.vault.createFolder(current)
+        }
+      } catch { /* 已存在或无法创建，继续 */ }
+    }
+  }
+
+  private async ensureFile(): Promise<void> {
     const now = new Date()
     const year = now.getFullYear()
     const month = String(now.getMonth() + 1).padStart(2, '0')
@@ -352,36 +493,17 @@ export default class SuRecPlugin extends Plugin {
     const dateStr = `${year}-${month}-${day}`
     const folderPath = this.settings.getSettings().outputFolder
     const filename = `${folderPath}/转录_${dateStr}.md`
-
-    const vault = this.app.vault
-    let dir = vault.getAbstractFileByPath(folderPath)
-    if (!dir) {
-      vault.createFolder(folderPath)
-    }
-
-    let file = vault.getAbstractFileByPath(filename)
-    if (!file) {
-      vault.create(filename, `# Transcription (${dateStr})\n\n`)
-    }
-
     this.currentFile = filename
-  }
 
-  private insertSegment(): void {
-    const now = new Date()
-    const timeStr = now.toLocaleString('zh-CN', {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit'
-    })
+    await this.ensureFolder(folderPath)
 
-    this.ensureFile()
-    const file = this.app.vault.getAbstractFileByPath(this.currentFile)
-    if (!file) return
-
-    this.app.vault.read(file).then((content: string) => {
-      const newSegment = `\n\n---\n### ${timeStr}\n`
-      this.app.vault.modify(file, content + newSegment)
-    })
+    try {
+      if (!this.app.vault.getAbstractFileByPath(filename)) {
+        await this.app.vault.create(filename, `# Transcription (${dateStr})\n\n`)
+      }
+    } catch {
+      console.warn('[SuRec] Failed to create file:', filename)
+    }
   }
 
   private appendToNote(newText: string): void {

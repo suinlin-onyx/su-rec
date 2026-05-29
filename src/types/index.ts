@@ -101,6 +101,7 @@ export interface PluginSettings {
   autoStartServer: boolean
   serverStartTimeout: number
   outputFolder: string
+  recordingFolder: string
   debugMode: boolean
   logLevel: 'error' | 'warn' | 'info' | 'debug'
   pythonPath: string
@@ -115,7 +116,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   reconnectBaseDelay: 1000,
   autoStartServer: true,
   serverStartTimeout: 60000,
-  outputFolder: '00.raw/01.投资研究/音频转录',
+  outputFolder: 'Transcriptions',
+  recordingFolder: 'Recordings',
   debugMode: false,
   logLevel: 'info',
   pythonPath: ''

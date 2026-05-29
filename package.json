@@ -1,0 +1,19 @@
+{
+  "name": "su-rec",
+  "version": "1.0.0",
+  "description": "Real-time speech-to-text transcription using FunASR",
+  "main": "main.js",
+  "scripts": {
+    "build": "node build.js",
+    "dev": "node build.js --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "esbuild": "^0.21.0",
+    "obsidian": "latest",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "fix-webm-duration": "^1.0.6"
+  }
+}

@@ -141,13 +141,27 @@ function buildSettingsUI(
   heading(el, '输出设置')
 
   new Setting(el)
-    .setName('输出文件夹')
-    .setDesc('转录文本的输出路径（相对于保险库根目录）')
+    .setName('转录文本路径')
+    .setDesc('转录文本的输出路径（相对于保险库根目录），默认 Transcriptions')
     .addText(text => {
       text.setValue(settings.outputFolder)
+      text.inputEl.setAttribute('placeholder', 'Transcriptions')
       text.inputEl.addClass('surec-text-input')
       text.onChange(async (value) => {
-        store.updateSettings({ outputFolder: value })
+        store.updateSettings({ outputFolder: value || 'Transcriptions' })
+        await store.save()
+      })
+    })
+
+  new Setting(el)
+    .setName('录音文件路径')
+    .setDesc('录音文件的输出路径（相对于保险库根目录），默认 Recordings')
+    .addText(text => {
+      text.setValue(settings.recordingFolder)
+      text.inputEl.setAttribute('placeholder', 'Recordings')
+      text.inputEl.addClass('surec-text-input')
+      text.onChange(async (value) => {
+        store.updateSettings({ recordingFolder: value || 'Recordings' })
         await store.save()
       })
     })
