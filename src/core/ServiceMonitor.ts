@@ -184,6 +184,10 @@ export class ServiceMonitor {
 
     if (this.config.debugMode) {
       const exe = dir + 'python.exe'
+      if (!fs.existsSync(exe)) {
+        console.error('[ServiceMonitor] python.exe not found at:', exe)
+        return null
+      }
       console.log('[ServiceMonitor] Debug mode ON →', exe)
       return exe
     }
@@ -241,8 +245,9 @@ export class ServiceMonitor {
 
         if (this.config.debugMode) {
           // 调试模式：用 cmd /c start 创建独立控制台窗口，用户可看到服务端输出
+          // 注意：start 的窗口标题不能包含空格（cp.spawn 参数拼接时会破坏引号）
           const cmdArgs = [
-            '/c', 'start', '"Voice Transcribe Server"',
+            '/c', 'start', '"VoiceTranscribe"',
             '/D', this.config.cwd,
             pythonPath,
             ...args

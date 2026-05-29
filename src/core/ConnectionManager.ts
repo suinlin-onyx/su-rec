@@ -15,6 +15,7 @@ export class ConnectionManager {
   private reconnectTimer: number | null = null
   private heartbeatTimer: number | null = null
   private hasConnected = false
+  private connecting = false
 
   constructor(
     private config: ConnectionConfig,
@@ -22,8 +23,15 @@ export class ConnectionManager {
   ) {}
 
   async connect(port?: number): Promise<void> {
-    // 先关闭旧连接，防止连接堆积
+    // 防止重叠连接
+    if (this.connecting) return
+    this.connecting = true
+
+    // 先关闭旧连接，防止旧 onclose 回调干扰新连接
     if (this.ws) {
+      this.cancelReconnect()
+      this.ws.onclose = null
+      this.ws.onerror = null
       try { this.ws.close() } catch {}
       this.ws = null
     }
@@ -37,6 +45,7 @@ export class ConnectionManager {
 
       this.ws.onopen = () => {
         settled = true
+        this.connecting = false
         this.hasConnected = true
         this.setState('connected')
         this.reconnectAttempts = 0
@@ -57,9 +66,9 @@ export class ConnectionManager {
       this.ws.onerror = () => {
         if (!settled) {
           settled = true
+          this.connecting = false
           reject(new Error('WebSocket connection error'))
         }
-        // 只在从未成功连接过时才通知错误（连接后的 transient error 由 onclose 处理重连即可）
         if (!this.hasConnected) {
           this.callbacks.onError(new Error('WebSocket error'))
         }
@@ -67,6 +76,7 @@ export class ConnectionManager {
 
       this.ws.onclose = (event) => {
         this.stopHeartbeat()
+        this.connecting = false
         if (!settled) {
           settled = true
           reject(new Error(`WebSocket closed before open (code: ${event.code})`))

@@ -102,6 +102,9 @@ export interface PluginSettings {
   serverStartTimeout: number
   outputFolder: string
   recordingFolder: string
+  saveAudio: boolean
+  audioSource: 'microphone' | 'loopback' | 'both'
+  audioDevice: string
   debugMode: boolean
   logLevel: 'error' | 'warn' | 'info' | 'debug'
   pythonPath: string
@@ -118,6 +121,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   serverStartTimeout: 60000,
   outputFolder: 'Transcriptions',
   recordingFolder: 'Recordings',
+  saveAudio: true,
+  audioSource: 'microphone',
+  audioDevice: 'UGREEN USB MIC',
   debugMode: false,
   logLevel: 'info',
   pythonPath: ''

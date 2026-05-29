@@ -166,6 +166,46 @@ function buildSettingsUI(
       })
     })
 
+  new Setting(el)
+    .setName('保存录音文件')
+    .setDesc('录音结束后在服务端保存录音文件（包含麦克风和PC音频），并将文件路径插入笔记')
+    .addToggle(toggle => {
+      toggle.setValue(settings.saveAudio)
+      toggle.onChange(async (value) => {
+        store.updateSettings({ saveAudio: value })
+        await store.save()
+      })
+    })
+
+  heading(el, '音频设备')
+
+  new Setting(el)
+    .setName('音频输入源')
+    .setDesc('选择服务端音频采集来源：麦克风、系统音频（PC声音）或两者同时')
+    .addDropdown(dropdown => {
+      dropdown.addOption('both', '麦克风 + 系统音频')
+      dropdown.addOption('microphone', '仅麦克风')
+      dropdown.addOption('loopback', '仅系统音频')
+      dropdown.setValue(settings.audioSource)
+      dropdown.onChange(async (value) => {
+        store.updateSettings({ audioSource: value as any })
+        await store.save()
+      })
+    })
+
+  new Setting(el)
+    .setName('服务端音频设备')
+    .setDesc('服务端录音所用的音频设备名称（模糊匹配，如 UGREEN USB MIC）。留空使用系统默认设备')
+    .addText(text => {
+      text.setValue(settings.audioDevice)
+      text.inputEl.setAttribute('placeholder', '例如: UGREEN USB MIC')
+      text.inputEl.addClass('surec-text-input')
+      text.onChange(async (value) => {
+        store.updateSettings({ audioDevice: value })
+        await store.save()
+      })
+    })
+
   heading(el, '调试')
 
   new Setting(el)
